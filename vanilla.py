@@ -1,4 +1,3 @@
-import tensorflow as tf
 import numpy as np
 import gym
 from gym.spaces import Discrete, Box
@@ -8,13 +7,6 @@ from torch.distributions import Categorical
 import torch.nn.functional as F
 
 
-def mlp(x, sizes, activation=tf.tanh, output_activation=None):
-    # Build a feedforward neural network.
-    for size in sizes[:-1]:
-        x = tf.layers.dense(x, units=size, activation=activation)
-    return tf.layers.dense(x, units=sizes[-1], activation=output_activation), x
-
-
 class MLP(nn.Module):
     def __init__(self, sizes, activation=torch.tanh, out_activation=None):
         super().__init__()
@@ -22,9 +14,6 @@ class MLP(nn.Module):
         self.layers = nn.ModuleList()
         for in_, out_ in zip(sizes, sizes[1:]):
             layer = nn.Linear(in_, out_)
-            with torch.no_grad():
-                layer.bias.zero_()
-
             self.layers.append(layer)
         self.activation = activation
         self.out_activation = out_activation
@@ -39,9 +28,19 @@ class MLP(nn.Module):
         return x
 
 
+class DiscretePolicy(nn.Module):
+    def __init__(self, policy_model):
+        super().__init__()
+        self.model = policy_model
+
+    def forward(self, state):
+        logits = self.model(state)
+        return Categorical(logits=logits)
+
+
 def train(
     env_name="CartPole-v0",
-    hidden_sizes=[32],
+    hidden_sizes=[100],
     lr=1e-2,
     epochs=100,
     batch_size=5000,
@@ -61,192 +60,104 @@ def train(
     n_acts = env.action_space.n
 
     # make core of policy network
-    obs_ph = tf.placeholder(shape=(None, obs_dim), dtype=tf.float32)
-    logits, prev_layer = mlp(obs_ph, sizes=hidden_sizes + [n_acts])
     model = MLP(sizes=[obs_dim] + hidden_sizes + [n_acts])
-    model
+    policy = DiscretePolicy(model)
 
-    # make action selection op (outputs int actions, sampled from policy)
-    actions = tf.squeeze(tf.multinomial(logits=logits, num_samples=1), axis=1)
-
-    # make loss function whose gradient, for the right data, is policy gradient
-    weights_ph = tf.placeholder(shape=(None,), dtype=tf.float32)
-    act_ph = tf.placeholder(shape=(None,), dtype=tf.int32)
-    action_masks = tf.one_hot(act_ph, n_acts)
-    log_probs = tf.reduce_sum(action_masks * tf.nn.log_softmax(logits), axis=1)
-    loss = -tf.reduce_mean(weights_ph * log_probs)
-
-    # make train op
-    train_op = tf.train.AdamOptimizer(learning_rate=lr).minimize(loss)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-
-    sess = tf.InteractiveSession()
-    sess.run(tf.global_variables_initializer())
-
-    variables_names = [v.name for v in tf.trainable_variables()]
-    values = sess.run(variables_names)
-    model.layers[0].weight = nn.Parameter(torch.from_numpy(values[0].T))
-    model.layers[0].bias = nn.Parameter(torch.from_numpy(values[1]))
-    model.layers[1].weight = nn.Parameter(torch.from_numpy(values[2].T))
-    model.layers[1].bias = nn.Parameter(torch.from_numpy(values[3]))
+    optimizer = torch.optim.Adam(policy.parameters(), lr=lr)
 
     # training loop
     for i in range(epochs):
-        batch_loss, batch_rets, batch_lens = train_one_epoch(
-            env,
-            sess,
-            obs_ph,
-            act_ph,
-            weights_ph,
-            actions,
-            batch_size,
-            loss,
-            train_op,
-            render,
-            model,
-            optimizer,
-            action_masks,
-            logits,
-            log_probs,
-            prev_layer,
+        batch_loss, episodes = train_one_epoch(
+            env, batch_size, render, policy, optimizer, vpg_loss
         )
+        batch_rets = [episode.ret for episode in episodes]
+        batch_lens = [episode.len for episode in episodes]
         print(
             "epoch: %3d \t loss: %.3f \t return: %.3f \t ep_len: %.3f"
             % (i, batch_loss, np.mean(batch_rets), np.mean(batch_lens))
         )
 
 
-# for training policy
-def train_one_epoch(
-    env,
-    sess,
-    obs_ph,
-    act_ph,
-    weights_ph,
-    actions,
-    batch_size,
-    loss,
-    train_op,
-    render,
-    model,
-    optimizer,
-    action_masks_op,
-    logits_op,
-    log_probs_op,
-    prev_layer_op,
-):
-    # make some empty lists for logging.
-    batch_obs = []  # for observations
-    batch_acts = []  # for actions
-    batch_weights = []  # for R(tau) weighting in policy gradient
-    batch_rets = []  # for measuring episode returns
-    batch_lens = []  # for measuring episode lengths
+class Episode:
+    def __init__(self):
+        self.obs = []
+        self.act = []
+        self.rew = []
+
+    def end(self):
+        self.ret = sum(self.rew)
+        self.len = len(self.rew)
+
+
+def train_one_epoch(env, batch_size, render, policy, optimizer, policy_loss):
+    episodes = []
+    episode = Episode()
 
     # reset episode-specific variables
     obs = env.reset()  # first obs comes from starting distribution
     done = False  # signal from environment that episode is over
-    ep_rews = []  # list for rewards accrued throughout ep
-
-    # render first episode of each epoch
-    finished_rendering_this_epoch = False
 
     # collect experience by acting in the environment with current policy
+    step = 0
     while True:
-
-        # rendering
-        if (not finished_rendering_this_epoch) and render:
-            env.render()
-
         # save obs
-        batch_obs.append(obs.copy())
+        episode.obs.append(obs)
 
         # act in the environment
-        # logits = model(torch.from_numpy(obs).float())
-        # dist = Categorical(logits=logits)
-        # act = dist.sample().item()
-        # obs, rew, done, _ = env.step(act)
-        act = sess.run(actions, {obs_ph: obs.reshape(1, -1)})[0]
+        dist = policy(torch.from_numpy(obs).float())
+        act = dist.sample().item()
         obs, rew, done, _ = env.step(act)
 
         # save action, reward
-        batch_acts.append(act)
-        ep_rews.append(rew)
+        episode.act.append(act)
+        episode.rew.append(rew)
 
         if done:
             # if episode is over, record info about episode
-            ep_ret, ep_len = sum(ep_rews), len(ep_rews)
-            batch_rets.append(ep_ret)
-            batch_lens.append(ep_len)
-
-            # the weight for each logprob(a|s) is R(tau)
-            batch_weights += [ep_ret] * ep_len
+            episode.end()
+            episodes.append(episode)
 
             # reset episode-specific variables
-            obs, done, ep_rews = env.reset(), False, []
-
-            # won't render again this epoch
-            finished_rendering_this_epoch = True
+            obs, done = env.reset(), False
+            episode = Episode()
 
             # end experience loop if we have enough of it
-            if len(batch_obs) > batch_size:
+            if step > batch_size:
                 break
+        step += 1
 
-    # take a single policy gradient update step
-    OBS = np.array(batch_obs).astype(np.float32)
-    WEIGHTS = np.array(batch_weights).astype(np.float32)
-    ACTS = np.array(batch_acts).astype(np.int)
     optimizer.zero_grad()
-    B = len(batch_acts)
-    action_masks = torch.zeros((B, 2))
-    action_masks.scatter_(1, torch.from_numpy(ACTS).unsqueeze(1), 1)
-    logits = model(torch.from_numpy(OBS))
-    log_probs = (action_masks * F.log_softmax(logits, dim=-1)).sum(dim=1)
-    weights = torch.from_numpy(WEIGHTS)
-    batch_loss = -((weights * log_probs).mean())
-
-    variables_names = [v.name for v in tf.trainable_variables()]
-    values = sess.run(variables_names)
-
-    tf_logits = sess.run([logits_op], feed_dict={obs_ph: OBS})[0]
-    tf_loss = sess.run(
-        [loss], feed_dict={obs_ph: OBS, act_ph: ACTS, weights_ph: WEIGHTS}
-    )
-    X = sess.run(
-        [prev_layer_op], feed_dict={obs_ph: OBS, act_ph: ACTS, weights_ph: WEIGHTS}
-    )[0]
-    Y = sess.run(
-        [logits_op], feed_dict={obs_ph: OBS, act_ph: ACTS, weights_ph: WEIGHTS}
-    )[0]
-    XX = model.activation(model.layers[0](torch.from_numpy(OBS))).detach().numpy()
-    YY = model.layers[1](torch.from_numpy(XX)).detach().numpy()
-    print(f"tf loss: {tf_loss}, torch loss: {batch_loss}")
-    print(f"X: {(X - XX).mean()}")
-    print(f"Y: {(Y - YY).mean()}")
-    print(f"A: {(model.layers[0].weight.detach().numpy() - values[0].T).mean()}")
-    print(f"B: {(model.layers[0].bias.detach().numpy() - values[1]).mean()}")
-    print(f"C: {(model.layers[1].weight.detach().numpy() - values[2].T).mean()}")
-    print(f"D: {(model.layers[1].bias.detach().numpy() - values[3]).mean()}")
-    print(f"logits: {(logits.detach().numpy() - tf_logits).mean()}")
-    tf_loss, _ = sess.run(
-        [loss, train_op],
-        feed_dict={
-            obs_ph: np.array(batch_obs),
-            act_ph: np.array(batch_acts),
-            weights_ph: np.array(batch_weights),
-        },
-    )
-
-    batch_loss.backward()
+    loss = policy_loss(episodes, policy)
+    loss.backward()
     optimizer.step()
 
-    variables_names = [v.name for v in tf.trainable_variables()]
-    values = sess.run(variables_names)
-    print(f"tf loss: {tf_loss}, torch loss: {batch_loss}")
-    print(f"A: {(model.layers[0].weight.detach().numpy() - values[0].T).mean()}")
-    print(f"B: {(model.layers[0].bias.detach().numpy() - values[1]).mean()}")
-    print(f"C: {(model.layers[1].weight.detach().numpy() - values[2].T).mean()}")
-    print(f"D: {(model.layers[1].bias.detach().numpy() - values[3]).mean()}")
-    return batch_loss, batch_rets, batch_lens
+    return loss, episodes
+
+
+def vpg_loss(episodes, policy):
+    # take a single policy gradient update step
+    batch_obs = [item for episode in episodes for item in episode.obs]
+    batch_acts = [item for episode in episodes for item in episode.act]
+    batch_weights = [episode.ret for episode in episodes for item in episode.rew]
+
+    dist = policy(torch.Tensor(batch_obs))
+    log_probs = dist.log_prob(torch.Tensor(batch_acts))
+    weights = torch.Tensor(batch_weights)
+    loss = -((weights * log_probs).mean())
+    return loss
+
+
+def ppo_loss(episodes, policy):
+    # take a single policy gradient update step
+    batch_obs = [item for episode in episodes for item in episode.obs]
+    batch_acts = [item for episode in episodes for item in episode.act]
+    batch_weights = [episode.ret for episode in episodes for item in episode.rew]
+
+    dist = policy(torch.Tensor(batch_obs))
+    log_probs = dist.log_prob(torch.Tensor(batch_acts))
+    weights = torch.Tensor(batch_weights)
+    loss = -((weights * log_probs).mean())
+    return loss
 
 
 if __name__ == "__main__":
