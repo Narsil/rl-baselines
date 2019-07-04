@@ -2,8 +2,8 @@
 
 On the task list: 
 
-- Vanilla Policy Gradient
-- PPO
-- RDN
-- World models
+- [x] Vanilla Policy Gradient
+- [x] PPO
+- [ ] RDN
+- [ ] World models
 
