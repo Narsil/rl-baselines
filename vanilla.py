@@ -3,8 +3,9 @@ import gym
 from gym.spaces import Discrete, Box
 import torch
 import torch.nn as nn
-from torch.distributions import Categorical
-import torch.nn.functional as F
+import tqdm
+from torch.distributions import Categorical, MultivariateNormal
+from torch.utils.tensorboard import SummaryWriter
 
 
 class MLP(nn.Module):
@@ -38,6 +39,19 @@ class DiscretePolicy(nn.Module):
         return Categorical(logits=logits)
 
 
+class ContinuousPolicy(nn.Module):
+    def __init__(self, policy_model, action_shape):
+        super().__init__()
+        self.model = policy_model
+
+        # log_std = -0.5 -> std=0.6
+        self.log_std = nn.Parameter(-0.5 * torch.ones(*action_shape))
+
+    def forward(self, state):
+        mu = self.model(state)
+        return MultivariateNormal(mu, torch.diag(self.log_std.exp()))
+
+
 class PolicyUpdate:
     def __init__(self, policy, optimizer, normalize_baseline):
         self.normalize_baseline = normalize_baseline
@@ -66,6 +80,14 @@ class PolicyUpdate:
         self.optimizer.step()
         return loss
 
+    def batch(self, episodes):
+        batch_obs = [item for episode in episodes for item in episode.obs]
+        batch_acts = [item for episode in episodes for item in episode.act]
+        weights = self.baseline(episodes)
+        obs = torch.Tensor(batch_obs)
+        acts = torch.Tensor(batch_acts).unsqueeze(1)
+        return obs, acts, weights
+
 
 class VPGUpdate(PolicyUpdate):
     def _baseline(self, episodes):
@@ -80,56 +102,12 @@ class VPGUpdate(PolicyUpdate):
         return weights
 
     def loss(self, policy, episodes):
-        batch_obs = [item for episode in episodes for item in episode.obs]
-        batch_acts = [item for episode in episodes for item in episode.act]
+        obs, acts, weights = self.batch(episodes)
 
-        weights = self.baseline(episodes)
-
-        dist = policy(torch.Tensor(batch_obs))
-        log_probs = dist.log_prob(torch.Tensor(batch_acts))
+        dist = policy(obs)
+        log_probs = dist.log_prob(acts)
         loss = -((weights * log_probs).mean())
         return loss
-
-
-def train(
-    env_name="CartPole-v0",
-    hidden_sizes=[100],
-    lr=1e-2,
-    epochs=100,
-    batch_size=5000,
-    render=False,
-):
-
-    # make environment, check spaces, get obs / act dims
-    env = gym.make(env_name)
-    assert isinstance(
-        env.observation_space, Box
-    ), "This example only works for envs with continuous state spaces."
-    assert isinstance(
-        env.action_space, Discrete
-    ), "This example only works for envs with discrete action spaces."
-
-    obs_dim = env.observation_space.shape[0]
-    n_acts = env.action_space.n
-
-    # make core of policy network
-    model = MLP(sizes=[obs_dim] + hidden_sizes + [n_acts])
-    policy = DiscretePolicy(model)
-
-    optimizer = torch.optim.Adam(policy.parameters(), lr=lr)
-
-    policy_update = VPGUpdate(policy, optimizer, normalize_baseline=True)
-    # training loop
-    for i in range(epochs):
-        batch_loss, episodes = train_one_epoch(
-            env, batch_size, render, policy, optimizer, policy_update=policy_update
-        )
-        batch_rets = [episode.ret for episode in episodes]
-        batch_lens = [episode.len for episode in episodes]
-        print(
-            "epoch: %3d \t loss: %.3f \t return: %.3f \t ep_len: %.3f"
-            % (i, batch_loss, np.mean(batch_rets), np.mean(batch_lens))
-        )
 
 
 class Episode:
@@ -183,6 +161,62 @@ def train_one_epoch(env, batch_size, render, policy, optimizer, policy_update):
     loss = policy_update.update(episodes)
 
     return loss, episodes
+
+
+def train(
+    env_name="CartPole-v0",
+    hidden_sizes=[100],
+    lr=1e-2,
+    epochs=100,
+    batch_size=5000,
+    render=False,
+):
+
+    # make environment, check spaces, get obs / act dims
+    env = gym.make(env_name)
+    assert isinstance(
+        env.observation_space, Box
+    ), "This example only works for envs with continuous state spaces."
+    assert isinstance(
+        env.action_space, (Discrete, Box)
+    ), "This example only works for envs with discrete/box action spaces."
+
+    obs_dim = env.observation_space.shape[0]
+    if isinstance(env.action_space, Discrete):
+        n_acts = env.action_space.n
+        model = MLP(sizes=[obs_dim] + hidden_sizes + [n_acts])
+        policy = DiscretePolicy(model)
+    elif isinstance(env.action_space, Box):
+        assert (
+            len(env.action_space.shape) == 1
+        ), "Can't handle Box action_shape with more than 1 dimension"
+        n_acts = env.action_space.shape[0]
+        model = MLP(sizes=[obs_dim] + hidden_sizes + [n_acts])
+        policy = ContinuousPolicy(model, env.action_space.shape)
+    else:
+        raise NotImplementedError(
+            "We don't handle action spaces different from box/discrete yet."
+        )
+
+    optimizer = torch.optim.Adam(policy.parameters(), lr=lr)
+
+    policy_update = VPGUpdate(policy, optimizer, normalize_baseline=True)
+
+    writer = SummaryWriter()
+    env_step = 0
+    for epoch in range(epochs):
+        batch_loss, episodes = train_one_epoch(
+            env, batch_size, render, policy, optimizer, policy_update=policy_update
+        )
+        rets = np.mean([episode.ret for episode in episodes])
+        lens = np.mean([episode.len for episode in episodes])
+        print(
+            "epoch: %3d \t loss: %.3f \t return: %.3f \t ep_len: %.3f"
+            % (epoch, batch_loss, rets, lens)
+        )
+        env_step += sum([episode.len for episode in episodes])
+        writer.add_scalar(f"{env_name}/episode_reward", rets, global_step=env_step)
+        writer.add_scalar(f"{env_name}/episode_length", lens, global_step=env_step)
 
 
 if __name__ == "__main__":
