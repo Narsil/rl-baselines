@@ -38,6 +38,59 @@ class DiscretePolicy(nn.Module):
         return Categorical(logits=logits)
 
 
+class PolicyUpdate:
+    def __init__(self, policy, optimizer, normalize_baseline):
+        self.normalize_baseline = normalize_baseline
+        self.policy = policy
+        self.optimizer = optimizer
+
+    def _baseline(self, episodes):
+        """This is the policy baseline, but don't add normalization it is
+        added in the `baseline` method."""
+        raise NotImplementedError
+
+    def baseline(self, episodes):
+        batch_weights = self._baseline(episodes)
+        weights = torch.Tensor(batch_weights)
+        if self.normalize_baseline:
+            weights = (weights - weights.mean()) / (weights.std() + 1e-5)
+        return weights
+
+    def loss(self, policy, episodes):
+        raise NotImplementedError
+
+    def update(self, episodes):
+        self.optimizer.zero_grad()
+        loss = self.loss(self.policy, episodes)
+        loss.backward()
+        self.optimizer.step()
+        return loss
+
+
+class VPGUpdate(PolicyUpdate):
+    def _baseline(self, episodes):
+        weights = []
+        for episode in episodes:
+            ret = 0
+            returns = []
+            for rew in reversed(episode.rew):
+                ret += rew
+                returns.append(ret)
+            weights += list(reversed(returns))
+        return weights
+
+    def loss(self, policy, episodes):
+        batch_obs = [item for episode in episodes for item in episode.obs]
+        batch_acts = [item for episode in episodes for item in episode.act]
+
+        weights = self.baseline(episodes)
+
+        dist = policy(torch.Tensor(batch_obs))
+        log_probs = dist.log_prob(torch.Tensor(batch_acts))
+        loss = -((weights * log_probs).mean())
+        return loss
+
+
 def train(
     env_name="CartPole-v0",
     hidden_sizes=[100],
@@ -65,10 +118,11 @@ def train(
 
     optimizer = torch.optim.Adam(policy.parameters(), lr=lr)
 
+    policy_update = VPGUpdate(policy, optimizer, normalize_baseline=True)
     # training loop
     for i in range(epochs):
         batch_loss, episodes = train_one_epoch(
-            env, batch_size, render, policy, optimizer, vpg_loss
+            env, batch_size, render, policy, optimizer, policy_update=policy_update
         )
         batch_rets = [episode.ret for episode in episodes]
         batch_lens = [episode.len for episode in episodes]
@@ -89,7 +143,7 @@ class Episode:
         self.len = len(self.rew)
 
 
-def train_one_epoch(env, batch_size, render, policy, optimizer, policy_loss):
+def train_one_epoch(env, batch_size, render, policy, optimizer, policy_update):
     episodes = []
     episode = Episode()
 
@@ -126,38 +180,9 @@ def train_one_epoch(env, batch_size, render, policy, optimizer, policy_loss):
                 break
         step += 1
 
-    optimizer.zero_grad()
-    loss = policy_loss(episodes, policy)
-    loss.backward()
-    optimizer.step()
+    loss = policy_update.update(episodes)
 
     return loss, episodes
-
-
-def vpg_loss(episodes, policy):
-    # take a single policy gradient update step
-    batch_obs = [item for episode in episodes for item in episode.obs]
-    batch_acts = [item for episode in episodes for item in episode.act]
-    batch_weights = [episode.ret for episode in episodes for item in episode.rew]
-
-    dist = policy(torch.Tensor(batch_obs))
-    log_probs = dist.log_prob(torch.Tensor(batch_acts))
-    weights = torch.Tensor(batch_weights)
-    loss = -((weights * log_probs).mean())
-    return loss
-
-
-def ppo_loss(episodes, policy):
-    # take a single policy gradient update step
-    batch_obs = [item for episode in episodes for item in episode.obs]
-    batch_acts = [item for episode in episodes for item in episode.act]
-    batch_weights = [episode.ret for episode in episodes for item in episode.rew]
-
-    dist = policy(torch.Tensor(batch_obs))
-    log_probs = dist.log_prob(torch.Tensor(batch_acts))
-    weights = torch.Tensor(batch_weights)
-    loss = -((weights * log_probs).mean())
-    return loss
 
 
 if __name__ == "__main__":
