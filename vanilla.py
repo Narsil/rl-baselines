@@ -3,9 +3,11 @@ import gym
 from gym.spaces import Discrete, Box
 import torch
 import torch.nn as nn
-import tqdm
 from torch.distributions import Categorical, MultivariateNormal
 from torch.utils.tensorboard import SummaryWriter
+import logging
+
+logger = logging.getLogger("Vanilla")
 
 
 class MLP(nn.Module):
@@ -210,7 +212,7 @@ def train(
         )
         rets = np.mean([episode.ret for episode in episodes])
         lens = np.mean([episode.len for episode in episodes])
-        print(
+        logger.debug(
             "epoch: %3d \t loss: %.3f \t return: %.3f \t ep_len: %.3f"
             % (epoch, batch_loss, rets, lens)
         )
