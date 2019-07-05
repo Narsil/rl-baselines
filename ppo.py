@@ -1,8 +1,5 @@
-from core import PolicyUpdate
+from core import PolicyUpdate, logger, logdir
 import torch
-import logging
-
-logger = logging.getLogger("ppo")
 
 
 class PPO(PolicyUpdate):
@@ -58,9 +55,7 @@ class PPO(PolicyUpdate):
 
 if __name__ == "__main__":
     import argparse
-    from core import set_logger, train, create_models
-
-    set_logger()
+    from core import solve, create_models, FutureReturnBaseline
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--env_name", "--env", type=str, default="CartPole-v0")
@@ -75,12 +70,8 @@ if __name__ == "__main__":
     hidden_sizes = [100]
     lr = 1e-2
     env, policy, optimizer = create_models(args.env_name, hidden_sizes, lr)
+    baseline = FutureReturnBaseline()
     policy_update = PPO(
-        args.policy_iters,
-        args.clip_ratio,
-        args.target_kl,
-        policy,
-        optimizer,
-        normalize_baseline=True,
+        args.policy_iters, args.clip_ratio, args.target_kl, policy, optimizer, baseline
     )
-    train(args.env_name, env, policy, optimizer, policy_update)
+    solve(args.env_name, env, policy_update, logdir)

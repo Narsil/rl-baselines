@@ -1,7 +1,4 @@
-from core import PolicyUpdate
-import logging
-
-logger = logging.getLogger("vanilla")
+from core import PolicyUpdate, logger, logdir
 
 
 class VPGUpdate(PolicyUpdate):
@@ -27,14 +24,12 @@ class VPGUpdate(PolicyUpdate):
 
 if __name__ == "__main__":
     import argparse
-    from core import set_logger, train, create_models
-
-    set_logger()
+    from core import solve, create_models, FullReturnBaseline, FutureReturnBaseline
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--env_name", "--env", type=str, default="CartPole-v0")
     parser.add_argument("--clip-ratio", "--clip", type=float, default=0.2)
-    parser.add_argument("--policy-iters", type=int, default=80)
+    parser.add_argument("--policy-iters", type=int, default=10)
     parser.add_argument("--target-kl", type=float, default=0.015)
     parser.add_argument("--render", action="store_true")
     parser.add_argument("--lr", type=float, default=1e-2)
@@ -44,5 +39,6 @@ if __name__ == "__main__":
     hidden_sizes = [100]
     lr = 1e-2
     env, policy, optimizer = create_models(args.env_name, hidden_sizes, lr)
-    policy_update = VPGUpdate(policy, optimizer, normalize_baseline=True)
-    train(args.env_name, env, policy, optimizer, policy_update)
+    baseline = FutureReturnBaseline()
+    policy_update = VPGUpdate(policy, optimizer, baseline)
+    solve(args.env_name, env, policy_update, logdir)

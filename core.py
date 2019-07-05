@@ -7,7 +7,46 @@ from torch.distributions import Categorical, MultivariateNormal
 from torch.utils.tensorboard import SummaryWriter
 import logging
 
-logger = logging.getLogger("core")
+
+def set_logger(logger):
+
+    formatter = logging.Formatter(
+        "%(asctime)s - %(filename)s:%(lineno)s - %(levelname)s - %(message)s"
+    )
+
+    root = logging.getLogger()
+    root.setLevel(logging.CRITICAL)
+    root.handlers = []
+
+    logger.setLevel(logging.DEBUG)
+    logger.handlers = []
+
+    # For some very annoying reason someone reaadds a streamHandler to root via absl.
+    # Seems the culprit is tensorflow....
+    # import sys
+    # handler = logging.StreamHandler(sys.stdout)
+    # handler.setLevel(logging.DEBUG)
+    # handler.setFormatter(formatter)
+    # logger.addHandler(handler)
+
+    import os
+    from datetime import datetime
+
+    current_time = datetime.now().strftime("%b%d_%H-%M-%S")
+    logdir = os.path.join("runs", current_time)
+
+    os.makedirs(logdir, exist_ok=True)
+    filename = os.path.join(logdir, "run.log")
+    handler = logging.FileHandler(filename)
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    return logdir
+
+
+logger = logging.getLogger("rl-baselines")
+if not logger.handlers:
+    logdir = set_logger(logger)
 
 
 class MLP(nn.Module):
@@ -54,23 +93,62 @@ class ContinuousPolicy(nn.Module):
         return MultivariateNormal(mu, torch.diag(self.log_std.exp()))
 
 
-class PolicyUpdate:
-    def __init__(self, policy, optimizer, normalize_baseline):
-        self.normalize_baseline = normalize_baseline
-        self.policy = policy
-        self.optimizer = optimizer
+class Baseline:
+    def __init__(self, normalize=True):
+        self.normalize = normalize
 
-    def _baseline(self, episodes):
-        """This is the policy baseline, but don't add normalization it is
-        added in the `baseline` method."""
+    def _get(self, episodes):
         raise NotImplementedError
 
-    def baseline(self, episodes):
-        batch_weights = self._baseline(episodes)
+    def __call__(self, episodes):
+        batch_weights = self._get(episodes)
         weights = torch.Tensor(batch_weights)
-        if self.normalize_baseline:
+        if self.normalize:
             weights = (weights - weights.mean()) / (weights.std() + 1e-5)
         return weights
+
+
+class FullReturnBaseline(Baseline):
+    def _get(self, episodes):
+        weights = [episode.ret for episode in episodes for _ in episode.rew]
+        return weights
+
+
+class FutureReturnBaseline(Baseline):
+    def _get(self, episodes):
+        weights = []
+        for episode in episodes:
+            ret = 0
+            returns = []
+            for rew in reversed(episode.rew):
+                ret += rew
+                returns.append(ret)
+            weights += list(reversed(returns))
+        return weights
+
+
+class DiscountedReturnBaseline(Baseline):
+    def __init__(self, gamma, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.gamma = gamma
+
+    def _get(self, episodes):
+        weights = []
+        for episode in episodes:
+            ret = 0
+            returns = []
+            for rew in reversed(episode.rew):
+                ret = rew + self.gamma * ret
+                returns.append(ret)
+            weights += list(reversed(returns))
+        return weights
+
+
+class PolicyUpdate:
+    def __init__(self, policy, optimizer, baseline):
+        self.baseline = baseline
+        self.policy = policy
+        self.optimizer = optimizer
 
     def loss(self, policy, episodes):
         raise NotImplementedError
@@ -87,7 +165,7 @@ class PolicyUpdate:
         batch_acts = [item for episode in episodes for item in episode.act]
         weights = self.baseline(episodes)
         obs = torch.Tensor(batch_obs)
-        acts = torch.Tensor(batch_acts).unsqueeze(1)
+        acts = torch.stack(batch_acts, dim=0)
         return obs, acts, weights
 
 
@@ -102,7 +180,7 @@ class Episode:
         self.len = len(self.rew)
 
 
-def train_one_epoch(env, batch_size, render, policy, optimizer, policy_update):
+def train_one_epoch(env, batch_size, render, policy_update):
     episodes = []
     episode = Episode()
 
@@ -110,6 +188,7 @@ def train_one_epoch(env, batch_size, render, policy, optimizer, policy_update):
     obs = env.reset()  # first obs comes from starting distribution
     done = False  # signal from environment that episode is over
 
+    policy = policy_update.policy
     # collect experience by acting in the environment with current policy
     step = 0
     while True:
@@ -118,8 +197,8 @@ def train_one_epoch(env, batch_size, render, policy, optimizer, policy_update):
 
         # act in the environment
         dist = policy(torch.from_numpy(obs).float())
-        act = dist.sample().item()
-        obs, rew, done, _ = env.step(act)
+        act = dist.sample()
+        obs, rew, done, _ = env.step(act.numpy())
 
         # save action, reward
         episode.act.append(act)
@@ -174,22 +253,20 @@ def create_models(env_name, hidden_sizes, lr):
     return env, policy, optimizer
 
 
-def train(
-    env_name,
-    env,
-    policy,
-    optimizer,
-    policy_update,
-    epochs=100,
-    batch_size=5000,
-    render=False,
+def solve(
+    env_name, env, policy_update, logdir, epochs=100, batch_size=5000, render=False
 ):
 
-    writer = SummaryWriter()
+    logger.info(f"Attempting to solve {env_name}")
+    logger.info(f"Epochs: {epochs}")
+    logger.info(f"Batch_size: {batch_size}")
+    logger.info(f"Policy Update: {policy_update}")
+    logger.info(f"Reward threshold: {env.spec.reward_threshold}")
+    writer = SummaryWriter(log_dir=logdir)
     env_step = 0
     for epoch in range(epochs):
         batch_loss, episodes = train_one_epoch(
-            env, batch_size, render, policy, optimizer, policy_update=policy_update
+            env, batch_size, render, policy_update=policy_update
         )
         rets = np.mean([episode.ret for episode in episodes])
         lens = np.mean([episode.len for episode in episodes])
@@ -200,37 +277,6 @@ def train(
         env_step += sum([episode.len for episode in episodes])
         writer.add_scalar(f"{env_name}/episode_reward", rets, global_step=env_step)
         writer.add_scalar(f"{env_name}/episode_length", lens, global_step=env_step)
-
-
-def set_logger():
-    import sys
-
-    root = logging.getLogger()
-    root.setLevel(logging.DEBUG)
-
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setLevel(logging.DEBUG)
-    formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
-    handler.setFormatter(formatter)
-    root.addHandler(handler)
-
-
-if __name__ == "__main__":
-    import argparse
-
-    set_logger()
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--env_name", "--env", type=str, default="CartPole-v0")
-    parser.add_argument("--render", action="store_true")
-    parser.add_argument("--lr", type=float, default=1e-2)
-    args = parser.parse_args()
-    print("\nUsing simplest formulation of policy gradient.\n")
-
-    hidden_sizes = [100]
-    lr = 1e-2
-    env, policy, optimizer = create_models(args.env_name, hidden_sizes, lr)
-    policy_update = VPGUpdate(policy, optimizer, normalize_baseline=True)
-    train(env, policy, optimizer, policy_update)
+        if rets > env.spec.reward_threshold:
+            logger.info(f"{env_name}: Solved !")
+            break
