@@ -6,6 +6,7 @@ import torch.nn as nn
 from torch.distributions import Categorical, MultivariateNormal
 from torch.utils.tensorboard import SummaryWriter
 import logging
+import os
 
 
 def set_logger(logger):
@@ -107,6 +108,9 @@ class Baseline:
             weights = (weights - weights.mean()) / (weights.std() + 1e-5)
         return weights
 
+    def __repr__(self):
+        return f"{self.__class__.__name__}(normalize={self.normalize})"
+
 
 class FullReturnBaseline(Baseline):
     def _get(self, episodes):
@@ -144,8 +148,9 @@ class DiscountedReturnBaseline(Baseline):
         return weights
 
 
-class PolicyUpdate:
+class PolicyUpdate(nn.Module):
     def __init__(self, policy, optimizer, baseline):
+        super().__init__()
         self.baseline = baseline
         self.policy = policy
         self.optimizer = optimizer
@@ -167,6 +172,9 @@ class PolicyUpdate:
         obs = torch.Tensor(batch_obs)
         acts = torch.stack(batch_acts, dim=0)
         return obs, acts, weights
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}(policy={self.policy}, optimizer={self.optimizer}, baseline={self.baseline})"
 
 
 class Episode:
@@ -257,13 +265,17 @@ def solve(
     env_name, env, policy_update, logdir, epochs=100, batch_size=5000, render=False
 ):
 
-    logger.info(f"Attempting to solve {env_name}")
-    logger.info(f"Epochs: {epochs}")
-    logger.info(f"Batch_size: {batch_size}")
-    logger.info(f"Policy Update: {policy_update}")
-    logger.info(f"Reward threshold: {env.spec.reward_threshold}")
     writer = SummaryWriter(log_dir=logdir)
     env_step = 0
+
+    logger.debug(f"Attempting to solve {env_name}")
+    logger.debug(f"Epochs: {epochs}")
+    logger.debug(f"Batch_size: {batch_size}")
+    logger.debug(f"Policy Update: {policy_update}")
+    logger.debug(f"Reward threshold: {env.spec.reward_threshold}")
+
+    max_ret = -1e9
+
     for epoch in range(epochs):
         batch_loss, episodes = train_one_epoch(
             env, batch_size, render, policy_update=policy_update
@@ -279,4 +291,10 @@ def solve(
         writer.add_scalar(f"{env_name}/episode_length", lens, global_step=env_step)
         if rets > env.spec.reward_threshold:
             logger.info(f"{env_name}: Solved !")
-            break
+            return True
+        if rets > max_ret:
+            filename = os.path.join(logdir, "checkpoint.pth")
+            torch.save(policy_update, filename)
+            logger.debug(f"Saved new best model: {filename}")
+            max_ret = rets
+    return False
