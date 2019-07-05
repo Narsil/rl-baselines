@@ -239,6 +239,9 @@ def create_models(env_name, hidden_sizes, lr):
         env.action_space, (Discrete, Box)
     ), "This example only works for envs with discrete/box action spaces."
 
+    assert (
+        len(env.observation_space.shape) == 1
+    ), f"This example only works for envs with Box(n,) not {env.observation_space} observation spaces."
     obs_dim = env.observation_space.shape[0]
     if isinstance(env.action_space, Discrete):
         n_acts = env.action_space.n
