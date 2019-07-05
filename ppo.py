@@ -28,8 +28,9 @@ class PPO(PolicyUpdate):
         dist = policy(obs)
         log_probs = dist.log_prob(acts)
 
-        ratio = (log_probs - old_log_probs).exp()
-        approx_kl = (old_log_probs - log_probs).mean().item()
+        diff = log_probs - old_log_probs
+        ratio = (diff).exp()
+        approx_kl = (-diff).mean().item()
         clipped = torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio)
 
         loss = -(torch.min(ratio * weights, clipped * weights)).mean()
@@ -46,9 +47,9 @@ class PPO(PolicyUpdate):
                 self.policy, episodes, obs, acts, weights, old_log_probs
             )
             if kl > self.target_kl:
-                logger.warning(
-                    f"Stopping after {i} iters because KL > {self.target_kl}"
-                )
+                # logger.warning(
+                #     f"Stopping after {i} iters because KL > {self.target_kl}"
+                # )
                 break
             loss.backward()
             self.optimizer.step()
@@ -64,7 +65,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--env_name", "--env", type=str, default="CartPole-v0")
     parser.add_argument("--clip-ratio", "--clip", type=float, default=0.2)
-    parser.add_argument("--policy-iters", type=int, default=80)
+    parser.add_argument("--policy-iters", type=int, default=10)
     parser.add_argument("--target-kl", type=float, default=0.015)
     parser.add_argument("--render", action="store_true")
     parser.add_argument("--lr", type=float, default=1e-2)
