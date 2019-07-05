@@ -1,6 +1,13 @@
 import unittest
 import logging
-from core import create_models, logdir, FutureReturnBaseline, solve, logger
+from core import (
+    create_models,
+    logdir,
+    FutureReturnBaseline,
+    solve,
+    logger,
+    FullReturnBaseline,
+)
 from vanilla import VPGUpdate
 from ppo import PPO
 
@@ -36,21 +43,11 @@ class TestVanilla(unittest.TestCase):
         result = solve(env_name, env, policy_update, logdir)
         self.assertEqual(result, True)
 
-
-class TestPpo(unittest.TestCase):
-    hidden_sizes = [100]
-    lr = 1e-2
-
     def test_lunar_lander_v2(self):
         env_name = "LunarLander-v2"
         env, policy, optimizer = create_models(env_name, self.hidden_sizes, self.lr)
         baseline = FullReturnBaseline()
-        policy_iters = 10
-        target_kl = 0.015
-        clip_ratio = 0.2
-        policy_update = PPO(
-            policy_iters, clip_ratio, target_kl, policy, optimizer, baseline
-        )
+        policy_update = VPGUpdate(policy, optimizer, baseline)
         result = solve(env_name, env, policy_update, logdir)
         self.assertEqual(result, True)
 

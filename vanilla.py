@@ -28,9 +28,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--env_name", "--env", type=str, default="CartPole-v0")
-    parser.add_argument("--clip-ratio", "--clip", type=float, default=0.2)
-    parser.add_argument("--policy-iters", type=int, default=10)
-    parser.add_argument("--target-kl", type=float, default=0.015)
+    parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--render", action="store_true")
     parser.add_argument("--lr", type=float, default=1e-2)
     args = parser.parse_args()
@@ -41,4 +39,4 @@ if __name__ == "__main__":
     env, policy, optimizer = create_models(args.env_name, hidden_sizes, lr)
     baseline = FutureReturnBaseline()
     policy_update = VPGUpdate(policy, optimizer, baseline)
-    solve(args.env_name, env, policy_update, logdir)
+    solve(args.env_name, env, policy_update, logdir, epochs=args.epochs)

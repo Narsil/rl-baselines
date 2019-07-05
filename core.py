@@ -10,7 +10,6 @@ import os
 
 
 def set_logger(logger):
-
     formatter = logging.Formatter(
         "%(asctime)s - %(filename)s:%(lineno)s - %(levelname)s - %(message)s"
     )
@@ -22,13 +21,12 @@ def set_logger(logger):
     logger.setLevel(logging.DEBUG)
     logger.handlers = []
 
-    # For some very annoying reason someone reaadds a streamHandler to root via absl.
-    # Seems the culprit is tensorflow....
-    # import sys
-    # handler = logging.StreamHandler(sys.stdout)
-    # handler.setLevel(logging.DEBUG)
-    # handler.setFormatter(formatter)
-    # logger.addHandler(handler)
+    import sys
+
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
 
     import os
     from datetime import datetime
@@ -267,6 +265,10 @@ def solve(
 
     writer = SummaryWriter(log_dir=logdir)
     env_step = 0
+
+    # Weird bug, tensorboard sets its own root logger, we need to remove it.
+    root = logging.getLogger()
+    root.handlers = []
 
     logger.debug(f"Attempting to solve {env_name}")
     logger.debug(f"Epochs: {epochs}")
