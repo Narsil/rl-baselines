@@ -291,7 +291,7 @@ def solve(
         env_step += sum([episode.len for episode in episodes])
         writer.add_scalar(f"{env_name}/episode_reward", rets, global_step=env_step)
         writer.add_scalar(f"{env_name}/episode_length", lens, global_step=env_step)
-        if rets > env.spec.reward_threshold:
+        if env.spec.reward_threshold and rets > env.spec.reward_threshold:
             logger.info(f"{env_name}: Solved !")
             return True
         if rets > max_ret:
@@ -299,4 +299,4 @@ def solve(
             torch.save(policy_update, filename)
             logger.debug(f"Saved new best model: {filename}")
             max_ret = rets
-    return False
+    return False if env.spec.reward_threshold else None
