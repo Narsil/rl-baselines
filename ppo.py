@@ -44,13 +44,13 @@ class PPO(PolicyUpdate):
                 self.policy, episodes, obs, acts, weights, old_log_probs
             )
             if kl > self.target_kl:
-                # logger.warning(
-                #     f"Stopping after {i} iters because KL > {self.target_kl}"
-                # )
+                logger.warning(
+                    f"Stopping after {i} iters because KL > {self.target_kl}"
+                )
                 break
             loss.backward()
             self.optimizer.step()
-        return loss
+        return {"ppo_loss": loss}
 
 
 if __name__ == "__main__":
@@ -58,27 +58,45 @@ if __name__ == "__main__":
     from core import (
         solve,
         create_models,
-        FutureReturnBaseline,
-        FullReturnBaseline,
+        GAEBaseline,
+        ActorCriticUpdate,
+        ValueUpdate,
         DiscountedReturnBaseline,
     )
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--env_name", "--env", type=str, default="CartPole-v0")
     parser.add_argument("--clip-ratio", "--clip", type=float, default=0.2)
-    parser.add_argument("--policy-iters", type=int, default=10)
-    parser.add_argument("--target-kl", type=float, default=0.015)
+    parser.add_argument("--policy-iters", type=int, default=80)
+    parser.add_argument("--value-iters", type=int, default=80)
+    parser.add_argument("--target-kl", type=float, default=0.01)
+    parser.add_argument("--batch-size", type=int, default=5000)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--render", action="store_true")
-    parser.add_argument("--lr", type=float, default=1e-2)
+    parser.add_argument("--lam", type=float, default=0.97)
+    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--lr", type=float, default=1e-3)
     args = parser.parse_args()
     logger.info("Using PPO formulation of policy gradient.")
 
-    hidden_sizes = [100]
-    lr = 1e-2
-    env, policy, optimizer = create_models(args.env_name, hidden_sizes, lr)
-    baseline = FullReturnBaseline()
+    hidden_sizes = [100, 100]
+    env, (policy, optimizer), (value, vopt) = create_models(
+        args.env_name, hidden_sizes, args.lr
+    )
+
+    baseline = GAEBaseline(value, gamma=args.gamma, lambda_=args.lam)
     policy_update = PPO(
         args.policy_iters, args.clip_ratio, args.target_kl, policy, optimizer, baseline
     )
-    solve(args.env_name, env, policy_update, logdir, epochs=args.epochs)
+
+    vbaseline = DiscountedReturnBaseline(gamma=args.gamma, normalize=False)
+    value_update = ValueUpdate(value, vopt, vbaseline, iters=args.value_iters)
+    update = ActorCriticUpdate(policy_update, value_update)
+    solve(
+        args.env_name,
+        env,
+        update,
+        logdir,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+    )
