@@ -75,13 +75,14 @@ if __name__ == "__main__":
     parser.add_argument("--render", action="store_true")
     parser.add_argument("--lam", type=float, default=0.97)
     parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--pi-lr", type=float, default=3e-4)
+    parser.add_argument("--vf-lr", type=float, default=1e-3)
     args = parser.parse_args()
     logger.info("Using PPO formulation of policy gradient.")
 
     hidden_sizes = [100, 100]
     env, (policy, optimizer), (value, vopt) = create_models(
-        args.env_name, hidden_sizes, args.lr
+        args.env_name, hidden_sizes, args.pi_lr, args.vf_lr
     )
 
     baseline = GAEBaseline(value, gamma=args.gamma, lambda_=args.lam)

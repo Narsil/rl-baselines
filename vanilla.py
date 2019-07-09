@@ -36,7 +36,7 @@ if __name__ == "__main__":
 
     hidden_sizes = [100]
     lr = 1e-2
-    env, (policy, optimizer), _ = create_models(args.env_name, hidden_sizes, lr)
+    env, (policy, optimizer), _ = create_models(args.env_name, hidden_sizes, lr, lr)
     baseline = FutureReturnBaseline()
     policy_update = VPGUpdate(policy, optimizer, baseline)
     solve(args.env_name, env, policy_update, logdir, epochs=args.epochs)

@@ -320,7 +320,7 @@ def train_one_epoch(env, batch_size, render, policy_update):
     return losses, episodes
 
 
-def create_models(env_name, hidden_sizes, lr):
+def create_models(env_name, hidden_sizes, pi_lr, vf_lr):
     # make environment, check spaces, get obs / act dims
     env = gym.make(env_name)
     assert isinstance(
@@ -349,9 +349,9 @@ def create_models(env_name, hidden_sizes, lr):
         raise NotImplementedError(
             "We don't handle action spaces different from box/discrete yet."
         )
-    poptimizer = torch.optim.Adam(policy.parameters(), lr=lr)
+    poptimizer = torch.optim.Adam(policy.parameters(), lr=pi_lr)
     value = MLP(sizes=[obs_dim] + hidden_sizes + [1])
-    voptimizer = torch.optim.Adam(value.parameters(), lr=lr)
+    voptimizer = torch.optim.Adam(value.parameters(), lr=vf_lr)
     return env, (policy, poptimizer), (value, voptimizer)
 
 
