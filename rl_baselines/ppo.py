@@ -1,5 +1,24 @@
-from core import PolicyUpdate, logger, logdir
+from rl_baselines.core import logger, logdir
+from rl_baselines.model_updates import PolicyUpdate
+import multiprocessing
 import torch
+
+
+def ppo_loss(policy, obs, acts, weights, old_log_probs, clip_ratio):
+    dist = policy(obs)
+    log_probs = dist.log_prob(acts)
+
+    diff = log_probs - old_log_probs
+    ratio = (diff).exp()
+    approx_kl = (diff ** 2).mean().item()
+    max_kl = (diff ** 2).max().item()
+    clipped = torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio)
+
+    clipfrac = ((ratio > (1 + clip_ratio)) | (ratio < (1 - clip_ratio))).float().mean()
+
+    loss = -(torch.min(ratio * weights, clipped * weights)).mean()
+    entropy = dist.entropy().mean()
+    return loss, approx_kl, max_kl, clipfrac, entropy
 
 
 class PPO(PolicyUpdate):
@@ -9,80 +28,57 @@ class PPO(PolicyUpdate):
         self.clip_ratio = clip_ratio
         self.target_kl = target_kl
 
-    def _baseline(self, episodes):
-        weights = []
-        for episode in episodes:
-            ret = 0
-            returns = []
-            for rew in reversed(episode.rew):
-                ret += rew
-                returns.append(ret)
-            weights += list(reversed(returns))
-        return weights
-
-    def loss(self, policy, episodes, obs, acts, weights, old_log_probs):
-        clip_ratio = self.clip_ratio
-        dist = policy(obs)
-        log_probs = dist.log_prob(acts)
-
-        diff = log_probs - old_log_probs
-        ratio = (diff).exp()
-        approx_kl = (-diff).mean().item()
-        clipped = torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio)
-
-        loss = -(torch.min(ratio * weights, clipped * weights)).mean()
-        return loss, approx_kl
-
     def update(self, episodes):
         obs, acts, weights = self.batch(episodes)
+
         with torch.no_grad():
             old_dist = self.policy(obs)
             old_log_probs = old_dist.log_prob(acts)
+        # logger.debug("\t".join(["pi_loss", "kl", "clipfrac", "entropy"]))
         for i in range(self.policy_iters):
             self.optimizer.zero_grad()
-            loss, kl = self.loss(
-                self.policy, episodes, obs, acts, weights, old_log_probs
+            loss, kl, max_kl, clipfrac, entropy = ppo_loss(
+                self.policy, obs, acts, weights, old_log_probs, self.clip_ratio
             )
             if kl > self.target_kl:
                 logger.warning(
                     f"Stopping after {i} iters because KL > {self.target_kl}"
                 )
                 break
+            # logger.debug("\t".join("%.4f" % v for v in [loss, kl, clipfrac, entropy]))
             loss.backward()
             self.optimizer.step()
-        return {"ppo_loss": loss}
+        infos = {}
+        return {"ppo_loss": loss}, infos
 
 
 if __name__ == "__main__":
     import argparse
-    from core import (
-        solve,
-        create_models,
-        GAEBaseline,
-        ActorCriticUpdate,
-        ValueUpdate,
-        DiscountedReturnBaseline,
-    )
+    from rl_baselines.core import solve, create_models, make_env
+    from rl_baselines.baselines import GAEBaseline, DiscountedReturnBaseline
+    from rl_baselines.model_updates import ActorCriticUpdate, ValueUpdate
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--env_name", "--env", type=str, default="CartPole-v0")
+    parser.add_argument("--env-name", "--env", type=str, default="CartPole-v0")
+    parser.add_argument("--num-envs", type=int, default=multiprocessing.cpu_count() - 1)
     parser.add_argument("--clip-ratio", "--clip", type=float, default=0.2)
     parser.add_argument("--policy-iters", type=int, default=80)
     parser.add_argument("--value-iters", type=int, default=80)
     parser.add_argument("--target-kl", type=float, default=0.01)
     parser.add_argument("--batch-size", type=int, default=5000)
     parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--render", action="store_true")
     parser.add_argument("--lam", type=float, default=0.97)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--pi-lr", type=float, default=3e-4)
     parser.add_argument("--vf-lr", type=float, default=1e-3)
     args = parser.parse_args()
+
     logger.info("Using PPO formulation of policy gradient.")
 
-    hidden_sizes = [100, 100]
-    env, (policy, optimizer), (value, vopt) = create_models(
-        args.env_name, hidden_sizes, args.pi_lr, args.vf_lr
+    hidden_sizes = [100]
+    env = make_env(args.env_name, args.num_envs)
+    (policy, optimizer), (value, vopt) = create_models(
+        env, hidden_sizes, args.pi_lr, args.vf_lr
     )
 
     baseline = GAEBaseline(value, gamma=args.gamma, lambda_=args.lam)
