@@ -29,19 +29,19 @@ def explained_variance(ypred, y):
     return np.nan if vary == 0 else 1 - (y - ypred).var() / vary
 
 
-def ortho_init(tensor, scale=1.0):
-    shape = tensor.shape
-    if len(shape) == 2:
-        flat_shape = shape
-    elif len(shape) == 4:  # assumes NHWC
-        flat_shape = (np.prod(shape[:-1]), shape[-1])
-    else:
-        raise NotImplementedError
-    a = torch.randn(flat_shape)
-    u, _, v = torch.svd(a)
-    q = u if u.shape == flat_shape else v  # pick the one with the correct shape
-    q = q.reshape(shape)
-    return (scale * q[: shape[0], : shape[1]]).float()
+# def ortho_init(tensor, scale=1.0):
+#     shape = tensor.shape
+#     if len(shape) == 2:
+#         flat_shape = shape
+#     elif len(shape) == 4:  # assumes NHWC
+#         flat_shape = (np.prod(shape[:-1]), shape[-1])
+#     else:
+#         raise NotImplementedError
+#     a = torch.randn(flat_shape)
+#     u, _, v = torch.svd(a)
+#     q = u if u.shape == flat_shape else v  # pick the one with the correct shape
+#     q = q.reshape(shape)
+#     return (scale * q[: shape[0], : shape[1]]).float()
 
 
 class RandomNet(nn.Module):
@@ -66,13 +66,13 @@ class RandomNet(nn.Module):
             self.fcs.append(nn.Linear(in_, out_))
             in_ = out_
 
-        for conv in self.int_convs:
-            nn.init.orthogonal_(conv.weight, gain=np.sqrt(2))
-            conv.bias.data.zero_()
+        # for conv in self.int_convs:
+        #     nn.init.orthogonal_(conv.weight, gain=np.sqrt(2))
+        #     conv.bias.data.zero_()
 
-        for fc in self.fcs:
-            nn.init.orthogonal_(fc.weight, gain=np.sqrt(2))
-            fc.bias.data.zero_()
+        # for fc in self.fcs:
+        #     nn.init.orthogonal_(fc.weight, gain=np.sqrt(2))
+        #     fc.bias.data.zero_()
 
         self.leaky_relu = nn.LeakyReLU(inplace=True)
         self.relu = nn.ReLU(inplace=True)
@@ -117,9 +117,9 @@ class CommonModel(nn.Module):
         self.fc1 = nn.Linear(2304, 256)
         self.fc2 = nn.Linear(256, 448)
 
-        for layer in list(self.convs) + [self.fc1, self.fc2]:
-            nn.init.orthogonal_(layer.weight, gain=np.sqrt(2))
-            layer.bias.data.zero_()
+        # for layer in list(self.convs) + [self.fc1, self.fc2]:
+        #     nn.init.orthogonal_(layer.weight, gain=np.sqrt(2))
+        #     layer.bias.data.zero_()
 
     def forward(self, obs):
         assert len(obs.shape) == 5
@@ -159,13 +159,13 @@ class GlobalModel(nn.Module):
         self.sibling_net = RandomNet([512, 512, 512])
         self.relu = nn.ReLU(inplace=True)
 
-        for layer in [self.fc_val, self.fc_act]:
-            nn.init.orthogonal_(layer.weight, gain=np.sqrt(0.1))
-            layer.bias.data.zero_()
+        # for layer in [self.fc_val, self.fc_act]:
+        #     nn.init.orthogonal_(layer.weight, gain=np.sqrt(0.1))
+        #     layer.bias.data.zero_()
 
-        for layer in [self.fc_logits, self.fc_value_int, self.fc_value_ext]:
-            nn.init.orthogonal_(layer.weight, gain=np.sqrt(0.01))
-            layer.bias.data.zero_()
+        # for layer in [self.fc_logits, self.fc_value_int, self.fc_value_ext]:
+        #     nn.init.orthogonal_(layer.weight, gain=np.sqrt(0.01))
+        #     layer.bias.data.zero_()
 
     def forward(self, obs):
         batch_squeeze = False
@@ -212,6 +212,52 @@ class GlobalModel(nn.Module):
         return rewards_loss, X_r
 
 
+class RewardForwardFilter:
+    def __init__(self, gamma):
+        self.rewsems = None
+        self.gamma = gamma
+
+    def update(self, rews):
+        if self.rewsems is None:
+            self.rewsems = rews
+        else:
+            self.rewsems = self.rewsems * self.gamma + rews
+        return self.rewsems
+
+
+class RunningMeanStd(object):
+    # https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Parallel_algorithm
+    def __init__(self, epsilon=1e-4, shape=()):
+        self.mean = torch.zeros(shape)
+        self.var = torch.ones(shape)
+        self.count = epsilon
+
+    def update(self, x):
+        batch_mean, batch_std, batch_count = (x.mean(dim=0), x.std(dim=0), x.shape[0])
+        batch_var = np.square(batch_std)
+        self.update_from_moments(batch_mean, batch_var, batch_count)
+
+    def update_from_moments(self, batch_mean, batch_var, batch_count):
+        delta = batch_mean - self.mean
+        tot_count = self.count + batch_count
+
+        new_mean = self.mean + delta * batch_count / tot_count
+        m_a = self.var * (self.count)
+        m_b = batch_var * (batch_count)
+        M2 = (
+            m_a
+            + m_b
+            + np.square(delta) * self.count * batch_count / (self.count + batch_count)
+        )
+        new_var = M2 / (self.count + batch_count)
+
+        new_count = batch_count + self.count
+
+        self.mean = new_mean
+        self.var = new_var
+        self.count = new_count
+
+
 class RDNValueUpdate(ValueUpdate):
     def __init__(
         self,
@@ -239,6 +285,13 @@ class RDNValueUpdate(ValueUpdate):
         self.value_ext_coeff = value_ext_coeff
         self.ent_coeff = ent_coeff
         self.num_mini_batches = num_mini_batches
+        self.rff_int = RewardForwardFilter(gamma)
+        self.rms_int = RunningMeanStd()
+
+    def normalize_rew_int(self, rews_int):
+        rffs_int = torch.stack([self.rff_int.update(rew) for rew in rews_int.t()])
+        self.rms_int.update(rffs_int.view(-1))
+        return rews_int / torch.sqrt(self.rms_int.var)
 
     def policy(self, obs):
         return self.model.policy(obs)
@@ -259,8 +312,8 @@ class RDNValueUpdate(ValueUpdate):
         rews_int, X_r = self.model.intrinsic_rewards(obs, self.obs_mean, obs_std)
         policy, pred_values_int, pred_values_ext = self.model(current_obs)
 
-        loss_int = 0.5 * ((pred_values_int - returns_int) ** 2).mean()
-        loss_ext = 0.5 * ((pred_values_ext - returns_ext) ** 2).mean()
+        loss_int = F.mse_loss(pred_values_int, returns_int)
+        loss_ext = F.mse_loss(pred_values_ext, returns_ext)
 
         # No coeff here, we try to learn value functions, not policy
         value_loss = loss_ext + loss_int
@@ -276,6 +329,9 @@ class RDNValueUpdate(ValueUpdate):
             "value_ext": loss_ext,
             "value_int": loss_int,
             "vf": value_loss,
+            "ev_int": explained_variance(
+                pred_values_int.view(-1), returns_int.view(-1)
+            ),
             "pi_loss": pi_loss,
             "ent": entropy,
             "clipfrac": clipfrac,
@@ -286,6 +342,12 @@ class RDNValueUpdate(ValueUpdate):
             "featmax": torch.abs(X_r).max(),
         }
         return loss, losses
+
+    def buf(self, name, shape):
+        hidden_name = "_" + name
+        if not hasattr(self, hidden_name):
+            setattr(self, hidden_name, torch.zeros(*shape))
+        return getattr(self, hidden_name)
 
     def update(self, episodes):
         # Remove last observation, it's not needed for the update
@@ -317,16 +379,24 @@ class RDNValueUpdate(ValueUpdate):
 
             # Model calls
             rews_int, X_r = self.model.intrinsic_rewards(obs, self.obs_mean, obs_std)
+
+            # XXX: This is critical yet not entirely obvious what is the normalization happenning.
+            # I would expect rews_int.std() to come closer to 1 given the formula, but that does not seem
+            # to be the case...
+            rews_int_norm = self.normalize_rew_int(rews_int)
+
             old_dist, values_int, values_ext = self.model(obs)
 
             next_ext = values_ext[:, -1, ...]
             next_int = values_int[:, -1, ...]
 
             # Intrinsic reward is non-episodic, so all dones = 0
-            dones = torch.zeros(*episodes.dones.shape)
-            advantages = torch.zeros(*episodes.rews.shape)
+            dones_int = self.buf("dones_int", episodes.dones.shape)
+            dones_int.zero_()
+            adv_int = self.buf("adv_int", episodes.rews.shape)
+            adv_int.zero_()
             adv_int = gae_advantages(
-                advantages, values_int, dones, rews_int, self.gamma, self.lambda_
+                adv_int, values_int, dones_int, rews_int_norm, self.gamma, self.lambda_
             )
             adv_ext = episodes.gae_advantages(values_ext, self.gamma_ext, self.lambda_)
 
@@ -335,37 +405,40 @@ class RDNValueUpdate(ValueUpdate):
             old_dist = Categorical(logits=old_dist.logits[:, :-1, ...])
             old_log_probs = old_dist.log_prob(acts)
 
-        returns_ext = episodes.discounted_returns(
-            gamma=self.gamma_ext, pred_values=next_ext
-        )
+            returns_ext = episodes.discounted_returns(
+                gamma=self.gamma_ext, pred_values=next_ext
+            )
 
-        dones = torch.zeros(*episodes.dones.shape)
-        returns_int = torch.zeros(*episodes.rews.shape)
-        returns_int = discounted_returns(
-            returns_int,
-            gamma=self.gamma,
-            pred_values=next_int,
-            dones=dones,
-            rews=rews_int,
-        )
+            returns_int = adv_int + values_int[:, :-1, ...]
+            returns_ext = adv_ext + values_ext[:, :-1, ...]
+            # returns_int = self.buf("returns_int", episodes.rews.shape)
+            # returns_int.zero_()
+            # returns_int = discounted_returns(
+            #     returns_int,
+            #     gamma=self.gamma,
+            #     pred_values=next_int,
+            #     dones=dones_int,
+            #     rews=rews_int,
+            # )
         nperbatch = B // self.num_mini_batches
 
         info = dict(
             advmean=advs.mean(),
             advstd=advs.std(),
-            retintmean=returns_int.mean(),  # previously retmean
-            retintstd=returns_int.std(),  # previously retstd
-            retextmean=returns_ext.mean(),  # previously not there
-            retextstd=returns_ext.std(),  # previously not there
-            rewintmean_unnorm=rews_int.mean(),  # previously rewmean
-            rewintmax_unnorm=rews_int.max(),  # previously not there
-            # rewintmean_norm=self.mean_int_rew,  # previously rewintmean
-            # rewintmax_norm=self.max_int_rew,  # previously rewintmax
-            # rewintstd_unnorm=rewstd,  # previously rewstd
-            vpredintmean=values_int.mean(),  # previously vpredmean
-            vpredintstd=values_int.std(),  # previously vrpedstd
-            vpredextmean=values_ext.mean(),  # previously not there
-            vpredextstd=values_ext.std(),  # previously not there
+            retintmean=returns_int.mean(),
+            retintstd=returns_int.std(),
+            retextmean=returns_ext.mean(),
+            retextstd=returns_ext.std(),
+            rewintmean=rews_int.mean(),
+            rewintmax=rews_int.max(),
+            rewintstd=rews_int.std(),
+            rewintmean_norm=rews_int_norm.mean(),
+            rewintmax_norm=rews_int_norm.max(),
+            rewintstd_norm=rews_int_norm.std(),
+            vpredintmean=values_int.mean(),
+            vpredintstd=values_int.std(),
+            vpredextmean=values_ext.mean(),
+            vpredextstd=values_ext.std(),
             ev_int=np.clip(
                 explained_variance(
                     values_int[:, :-1, ...].contiguous().view(-1), returns_int.view(-1)
@@ -383,6 +456,14 @@ class RDNValueUpdate(ValueUpdate):
         )
 
         info[f"mem_available"] = psutil.virtual_memory().available
+
+        print(info["ev_int"])
+        int_loss = F.mse_loss(returns_int, values_int[:, :-1, ...])
+        print(int_loss)
+        if info["ev_int"].item() < -0.99 and int_loss.item() < 1e-4:
+            import ipdb
+
+            ipdb.set_trace()
 
         for i in range(self.iters):
             for start in range(0, B, nperbatch):
@@ -441,10 +522,12 @@ if __name__ == "__main__":
     parser.add_argument("--lam", type=float, default=0.95)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gamma_ext", type=float, default=0.999)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lr", type=float, default=1e-4)
     args = parser.parse_args()
 
-    logger.info("Using PPO formulation of policy gradient.")
+    logger.info(
+        "Using PPO formulation of policy gradient with random distillation network for intrinsic loss."
+    )
 
     env = make_env(args.env_name, args.num_envs, frame_stack=args.frame_stack)
     if isinstance(env.action_space, Discrete):
