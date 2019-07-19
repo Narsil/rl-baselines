@@ -324,14 +324,16 @@ class RDNValueUpdate(ValueUpdate):
 
         aux_loss = rews_int.mean()
 
-        loss = pi_loss + value_loss + self.ent_coeff * entropy + aux_loss
+        loss = pi_loss + value_loss - self.ent_coeff * entropy + aux_loss
+        # loss = pi_loss + value_loss + aux_loss
         losses = {
             "value_ext": loss_ext,
             "value_int": loss_int,
             "vf": value_loss,
-            "ev_int": explained_variance(
-                pred_values_int.view(-1), returns_int.view(-1)
-            ),
+            # Done in info already, but could be used to debug if not >0
+            # "ev_int": explained_variance(
+            #     pred_values_int.view(-1), returns_int.view(-1)
+            # ),
             "pi_loss": pi_loss,
             "ent": entropy,
             "clipfrac": clipfrac,
@@ -457,14 +459,6 @@ class RDNValueUpdate(ValueUpdate):
 
         info[f"mem_available"] = psutil.virtual_memory().available
 
-        print(info["ev_int"])
-        int_loss = F.mse_loss(returns_int, values_int[:, :-1, ...])
-        print(int_loss)
-        if info["ev_int"].item() < -0.99 and int_loss.item() < 1e-4:
-            import ipdb
-
-            ipdb.set_trace()
-
         for i in range(self.iters):
             for start in range(0, B, nperbatch):
                 end = start + nperbatch
@@ -542,7 +536,7 @@ if __name__ == "__main__":
     optimizer = torch.optim.Adam(global_model.parameters(), lr=args.lr)
 
     assert (
-        args.num_envs > args.num_mini_batches
+        args.num_envs >= args.num_mini_batches
     ), "We need more environments than minibatches."
 
     update = RDNValueUpdate(

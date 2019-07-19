@@ -5,10 +5,10 @@ from rl_baselines.core import make_env
 import numpy as np
 
 
-def test_agent(env_name, policy_update_filename):
+def test_agent(env_name, policy_update_filename, frame_stack):
     policy_update = torch.load(policy_update_filename)
     logger.debug(f"Loaded : {policy_update}")
-    env = make_env(env_name, 1)
+    env = make_env(env_name, 1, frame_stack=frame_stack)
     obs = env.reset()
     done = np.array([False])
     policy = policy_update.policy
@@ -42,7 +42,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--policy-update", "--model", type=str)
     parser.add_argument("--env-name", "--env", type=str)
+    parser.add_argument("--frame-stack", type=int, default=None)
 
     args = parser.parse_args()
 
-    test_agent(args.env_name, args.policy_update)
+    test_agent(args.env_name, args.policy_update, args.frame_stack)
