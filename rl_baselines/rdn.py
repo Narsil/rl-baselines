@@ -29,21 +29,6 @@ def explained_variance(ypred, y):
     return np.nan if vary == 0 else 1 - (y - ypred).var() / vary
 
 
-# def ortho_init(tensor, scale=1.0):
-#     shape = tensor.shape
-#     if len(shape) == 2:
-#         flat_shape = shape
-#     elif len(shape) == 4:  # assumes NHWC
-#         flat_shape = (np.prod(shape[:-1]), shape[-1])
-#     else:
-#         raise NotImplementedError
-#     a = torch.randn(flat_shape)
-#     u, _, v = torch.svd(a)
-#     q = u if u.shape == flat_shape else v  # pick the one with the correct shape
-#     q = q.reshape(shape)
-#     return (scale * q[: shape[0], : shape[1]]).float()
-
-
 class RandomNet(nn.Module):
     def __init__(self, hidden_sizes):
         super().__init__()
@@ -65,14 +50,6 @@ class RandomNet(nn.Module):
         for out_ in hidden_sizes:
             self.fcs.append(nn.Linear(in_, out_))
             in_ = out_
-
-        # for conv in self.int_convs:
-        #     nn.init.orthogonal_(conv.weight, gain=np.sqrt(2))
-        #     conv.bias.data.zero_()
-
-        # for fc in self.fcs:
-        #     nn.init.orthogonal_(fc.weight, gain=np.sqrt(2))
-        #     fc.bias.data.zero_()
 
         self.leaky_relu = nn.LeakyReLU(inplace=True)
         self.relu = nn.ReLU(inplace=True)
@@ -116,10 +93,6 @@ class CommonModel(nn.Module):
 
         self.fc1 = nn.Linear(2304, 256)
         self.fc2 = nn.Linear(256, 448)
-
-        # for layer in list(self.convs) + [self.fc1, self.fc2]:
-        #     nn.init.orthogonal_(layer.weight, gain=np.sqrt(2))
-        #     layer.bias.data.zero_()
 
     def forward(self, obs):
         assert len(obs.shape) == 5
@@ -287,6 +260,13 @@ class RDNValueUpdate(ValueUpdate):
         self.num_mini_batches = num_mini_batches
         self.rff_int = RewardForwardFilter(gamma)
         self.rms_int = RunningMeanStd()
+        self.rff_ext = RewardForwardFilter(gamma)
+        self.rms_ext = RunningMeanStd()
+
+    def normalize_rew_ext(self, rews_ext):
+        rffs_ext = torch.stack([self.rff_ext.update(rew) for rew in rews_ext.t()])
+        self.rms_ext.update(rffs_ext.view(-1))
+        return rews_ext / torch.sqrt(self.rms_ext.var)
 
     def normalize_rew_int(self, rews_int):
         rffs_int = torch.stack([self.rff_int.update(rew) for rew in rews_int.t()])
@@ -330,10 +310,6 @@ class RDNValueUpdate(ValueUpdate):
             "value_ext": loss_ext,
             "value_int": loss_int,
             "vf": value_loss,
-            # Done in info already, but could be used to debug if not >0
-            # "ev_int": explained_variance(
-            #     pred_values_int.view(-1), returns_int.view(-1)
-            # ),
             "pi_loss": pi_loss,
             "ent": entropy,
             "clipfrac": clipfrac,
@@ -389,9 +365,6 @@ class RDNValueUpdate(ValueUpdate):
 
             old_dist, values_int, values_ext = self.model(obs)
 
-            next_ext = values_ext[:, -1, ...]
-            next_int = values_int[:, -1, ...]
-
             # Intrinsic reward is non-episodic, so all dones = 0
             dones_int = self.buf("dones_int", episodes.dones.shape)
             dones_int.zero_()
@@ -400,28 +373,23 @@ class RDNValueUpdate(ValueUpdate):
             adv_int = gae_advantages(
                 adv_int, values_int, dones_int, rews_int_norm, self.gamma, self.lambda_
             )
-            adv_ext = episodes.gae_advantages(values_ext, self.gamma_ext, self.lambda_)
+
+            rews_ext = episodes.rews
+            # rews_ext_norm = self.normalize_rew_ext(rews_ext)
+            dones_ext = episodes.dones
+            adv_ext = self.buf("adv_ext", episodes.rews.shape)
+            adv_ext.zero_()
+            adv_ext = gae_advantages(
+                adv_ext, values_ext, dones_ext, rews_ext, self.gamma_ext, self.lambda_
+            )
 
             advs = adv_int * self.value_int_coeff + adv_ext * self.value_ext_coeff
 
             old_dist = Categorical(logits=old_dist.logits[:, :-1, ...])
             old_log_probs = old_dist.log_prob(acts)
 
-            returns_ext = episodes.discounted_returns(
-                gamma=self.gamma_ext, pred_values=next_ext
-            )
-
             returns_int = adv_int + values_int[:, :-1, ...]
             returns_ext = adv_ext + values_ext[:, :-1, ...]
-            # returns_int = self.buf("returns_int", episodes.rews.shape)
-            # returns_int.zero_()
-            # returns_int = discounted_returns(
-            #     returns_int,
-            #     gamma=self.gamma,
-            #     pred_values=next_int,
-            #     dones=dones_int,
-            #     rews=rews_int,
-            # )
         nperbatch = B // self.num_mini_batches
 
         info = dict(

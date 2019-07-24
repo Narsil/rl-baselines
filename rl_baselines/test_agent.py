@@ -17,7 +17,8 @@ def test_agent(env_name, policy_update_filename, frame_stack):
     while not done.all():
         env.render()
         dist = policy(torch.from_numpy(obs).float())
-        act = dist.sample()
+        # act = dist.sample()
+        act = dist.logits.argmax().unsqueeze(0)
         obs, rew, done, _ = env.step(act.numpy())
         total_reward += rew
         steps += 1
