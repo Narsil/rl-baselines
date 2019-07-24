@@ -1,6 +1,6 @@
 from rl_baselines.core import logger, logdir, gae_advantages, discounted_returns
 from rl_baselines.ppo import ppo_loss
-from rl_baselines.model_updates import ValueUpdate
+from rl_baselines.model_updates import ModelUpdate
 from torch.distributions import Categorical
 from gym.spaces import Discrete, Box
 
@@ -231,7 +231,7 @@ class RunningMeanStd(object):
         self.count = new_count
 
 
-class RDNValueUpdate(ValueUpdate):
+class RDNModelUpdate(ModelUpdate):
     def __init__(
         self,
         model,
@@ -507,7 +507,7 @@ if __name__ == "__main__":
         args.num_envs >= args.num_mini_batches
     ), "We need more environments than minibatches."
 
-    update = RDNValueUpdate(
+    update = RDNModelUpdate(
         global_model,
         optimizer,
         args.gamma,

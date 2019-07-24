@@ -7,6 +7,7 @@ import numpy as np
 
 def test_agent(env_name, policy_update_filename, frame_stack):
     policy_update = torch.load(policy_update_filename)
+    policy_update.eval()
     logger.debug(f"Loaded : {policy_update}")
     env = make_env(env_name, 1, frame_stack=frame_stack)
     obs = env.reset()
@@ -17,8 +18,7 @@ def test_agent(env_name, policy_update_filename, frame_stack):
     while not done.all():
         env.render()
         dist = policy(torch.from_numpy(obs).float())
-        # act = dist.sample()
-        act = dist.logits.argmax().unsqueeze(0)
+        act = dist.sample()
         obs, rew, done, _ = env.step(act.numpy())
         total_reward += rew
         steps += 1
@@ -39,6 +39,7 @@ if __name__ == "__main__":
     from rl_baselines.reinforce import REINFORCE
     from rl_baselines.ppo import PPO
     from rl_baselines.rdn import *
+    from rl_baselines.rcrc import *
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--policy-update", "--model", type=str)

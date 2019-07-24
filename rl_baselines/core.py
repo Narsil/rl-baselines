@@ -290,7 +290,7 @@ def solve(
     root = logging.getLogger()
     root.handlers = []
 
-    parameters = sum(p.numel() for p in policy_update.parameters())
+    parameters = sum(p.numel() for p in policy_update.parameters() if p.requires_grad)
     logger.debug(f"Attempting to solve {env_name}")
     logger.debug(f"Epochs: {epochs}")
     logger.debug(f"Batch_size: {batch_size}")
